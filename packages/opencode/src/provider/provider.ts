@@ -135,6 +135,81 @@ export namespace Provider {
         options: {},
       }
     },
+    upstage: async () => {
+      return {
+        autoload: false,
+        options: {
+          baseURL: "https://api.upstage.ai/v1",
+          async fetch(input: any, init: any) {
+            const response = await fetch(input, init)
+            
+            // Handle streaming responses - transform Upstage format to OpenAI-compatible format
+            if (response.headers.get('content-type')?.includes('text/stream')) {
+              const stream = response.body
+              if (!stream) return response
+              
+              const transformedStream = new ReadableStream({
+                start(controller) {
+                  const reader = stream.getReader()
+                  
+                  function pump(): Promise<void> {
+                    return reader.read().then(({ done, value }) => {
+                      if (done) {
+                        controller.close()
+                        return
+                      }
+                      
+                      // Transform the chunk data
+                      try {
+                        const chunk = new TextDecoder().decode(value)
+                        const lines = chunk.split('\n')
+                        let transformedChunk = ''
+                        
+                        for (const line of lines) {
+                          if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+                            try {
+                              const jsonStr = line.slice(6)
+                              const data = JSON.parse(jsonStr)
+                              // Transform choices: null to choices: []
+                              if (data.choices === null) {
+                                data.choices = []
+                              }
+                              transformedChunk += `data: ${JSON.stringify(data)}\n`
+                            } catch {
+                              // Keep original line if parsing fails
+                              transformedChunk += line + '\n'
+                            }
+                          } else {
+                            transformedChunk += line + '\n'
+                          }
+                        }
+                        
+                        controller.enqueue(new TextEncoder().encode(transformedChunk))
+                      } catch {
+                        // If transformation fails, pass through original value
+                        controller.enqueue(value)
+                      }
+                      
+                      return pump()
+                    })
+                  }
+                  
+                  return pump()
+                }
+              })
+              
+              return new Response(transformedStream, {
+                status: response.status,
+                statusText: response.statusText,
+                headers: response.headers
+              })
+            }
+            
+            return response
+          },
+        },
+      }
+    },
     "amazon-bedrock": async () => {
       if (!process.env["AWS_PROFILE"] && !process.env["AWS_ACCESS_KEY_ID"] && !process.env["AWS_BEARER_TOKEN_BEDROCK"])
         return { autoload: false }
